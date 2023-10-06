@@ -53,13 +53,13 @@ def bootloader_test():
     restart_STM()
     
     print("sending spi-sync seqeunce...", end="")
-    rcvd = spi.xfer([sync_byte])
+    rcvd = spi.xfer3([sync_byte])
     print("done. rcvd: ")
     print('[{}]'.format(', '.join(hex(x) for x in rcvd)))
     
-    time.sleep(0.1)
+    time.sleep(5)
     print("sending spi-sync seqeunce...", end="")
-    rcvd = spi.xfer([0x00, ack_byte])
+    rcvd = spi.xfer3([0x00, 0xaa, ack_byte])
     print("done. rcvd: ")
     print('[{}]'.format(', '.join(hex(x) for x in rcvd)))
     
@@ -77,9 +77,10 @@ def bootloader_test():
 
 if __name__ == '__main__':
     setup_pins()
-    setup_spi()
+    restart_STM()
+    #setup_spi()
     
-    bootloader_test()
+    #bootloader_test()
     
     spi.close()
     print("DONE")
