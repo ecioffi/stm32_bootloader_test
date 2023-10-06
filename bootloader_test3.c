@@ -6,10 +6,12 @@
 #include <string.h> //for strcmp for argv comparisons in main
 
 const int bcm_delay = 20; // microseconds
-const int poll_timeout = 64;
+const int poll_timeout = 256;
+const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
 
-const uint8_t NRST_PIN = 4;
 const uint8_t BOOT0_PIN = 3;
+const uint8_t NRST_PIN = 4;
+const uint8_t SPI_PINS[4] = {8,9,10,11};
 
 const uint8_t DUMMY_BYTE = 0xA5;
 const uint8_t FRAME_BYTE = 0x5A;
@@ -124,7 +126,8 @@ void read_dfn_into(uint8_t* recv_buff, int len)
 void read_df_into(uint8_t* recv_buff)
 {
     swap_byte(DUMMY_BYTE);
-    int len = swap_byte(DUMMY_BYTE);
+    int len = swap_byte(DUMMY_BYTE)+1;
+    printf("read_df_into: len=%i\n", len);
     recv_bytes_into(recv_buff, len);
 }
 
@@ -188,18 +191,15 @@ uint8_t get_xor(uint8_t* data, uint8_t len)
 
 enum RET_CODE bootloader_get_ack()
 {
-    uint8_t recv;
     enum RET_CODE ret;
 
     // do we really need to check for dummy bytes here? STM basically always sends dummies
     // and if we don't get the ACK we will catch that anyway
-    if (swap_byte(ZERO_BYTE) != DUMMY_BYTE) { return RET_UNEXPECTED_BYTE; }
+    if ( swap_byte(ZERO_BYTE) != DUMMY_BYTE ) { return RET_UNEXPECTED_BYTE; }
 
     if ( (ret = send_until_recv(DUMMY_BYTE, ACK_BYTE) ) != RET_OK) { return ret; }
 
-    if ( (recv = swap_byte(ACK_BYTE) ) != DUMMY_BYTE) { return RET_UNEXPECTED_BYTE; }
-
-    return RET_OK;
+    return swap_byte(ACK_BYTE)==DUMMY_BYTE ? RET_OK : RET_UNEXPECTED_BYTE;
 }
 
 enum RET_CODE bootloader_sync()
@@ -215,11 +215,11 @@ enum RET_CODE bootloader_sync()
     return RET_OK;
 }
 
-const uint8_t* get_cmd_header(const uint8_t CMD_CODE)
-{
-    static uint8_t cmd_header[3];
-    cmd_header = {FRAME_BYTE, CMD_CODE, CMD_CODE^0xFF};
-}
+// const uint8_t* get_cmd_header(const uint8_t CMD_CODE)
+// {
+//     static uint8_t cmd_header[3];
+//     cmd_header = {FRAME_BYTE, CMD_CODE, CMD_CODE^0xFF};
+// }
 
 enum RET_CODE bootloader_cmd_test(uint8_t* buff)
 {
@@ -241,7 +241,8 @@ enum RET_CODE bootloader_cmd_read_memory(uint32_t address, uint8_t* buff, uint8_
 {
     printf("Command: Read memory 0x11 beginning\n");
     const uint8_t CMD_CODE = 0x11;
-    const uint8_t CMD_HEADER[3] = {  }
+    const uint8_t CMD_XOR  = CMD_CODE^0xFF;
+    const uint8_t CMD_HEADER[3] = {  };
     enum RET_CODE ret;
 
     swap_byte(FRAME_BYTE); // step1-start of frame
@@ -426,16 +427,16 @@ void restart_STM()
     bcm2835_gpio_write(NRST_PIN, 0);
     printf("done\n");
 
-    bcm2835_delay(1000);
+    bcm2835_delay(100);
 
     printf("setting reset-pin high...");
     bcm2835_gpio_write(NRST_PIN, 1);
     printf("done\n");
 
-    bcm2835_delay(100);
+    bcm2835_delay(1000);
 }
 
-void enter_bootloader()
+void configure_spi()
 {
     if (!bcm2835_init())
     {
@@ -447,18 +448,36 @@ void enter_bootloader()
         printf("bcm2835_spi_begin failed. Are you running as root??\n");
         exit(1);
     }
+
     // The defaults
     bcm2835_spi_setBitOrder(BCM2835_SPI_BIT_ORDER_MSBFIRST);
     bcm2835_spi_setDataMode(BCM2835_SPI_MODE0);
-    bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_128);
+    bcm2835_spi_setClockDivider(spi_clk_div);
     // bcm2835_spi_set_speed_hz(1000);
     bcm2835_spi_chipSelect(BCM2835_SPI_CS0);
     bcm2835_spi_setChipSelectPolarity(BCM2835_SPI_CS0, LOW);
 
+    bcm2835_gpio_fsel(BOOT0_PIN, BCM2835_GPIO_FSEL_OUTP);
+    bcm2835_gpio_fsel(NRST_PIN, BCM2835_GPIO_FSEL_OUTP);
+    for (int i=0; i<=sizeof(SPI_PINS); i++)
+    {
+        bcm2835_gpio_fsel(SPI_PINS[i], BCM2835_GPIO_FSEL_ALT0);
+    }
+}
+
+void cleanup_spi()
+{
+    printf("cleaning up and exiting...\n");
+    bcm2835_spi_end();
+    bcm2835_close();
+}
+
+void enter_bootloader()
+{
     printf("setting boot0-pin high...");
     bcm2835_gpio_write(BOOT0_PIN, 1);
     printf("done\n");
-    bcm2835_delay(100);
+    bcm2835_delay(1000);
 
     restart_STM();
 }
@@ -471,48 +490,75 @@ void exit_bootloader()
     bcm2835_delay(100);
 
     restart_STM();
-
-    printf("cleaning up and exiting...\n");
-    bcm2835_spi_end();
-    bcm2835_close();
 }
 
 int main(int argc, char **argv)
 {
-    enter_bootloader();
-    bootloader_sync();
-    // bootloader_cmd_test();
-    // bcm2835_delay(2000);
-
+    enum RET_CODE ret = RET_OK;
     uint8_t buff[256] = {0};
 
-    enum RET_CODE ret;
-    if (argc >= 2 && strcmp(argv[1], "write") == 0)
+    if (argc==1 ||
+        strcmp(argv[1], "help")==0 ||
+        strcmp(argv[1], "-h")==0 ||
+        strcmp(argv[1], "--help")==0 ||
+        strcmp(argv[1], "version")==0 ||
+        strcmp(argv[1], "-v")==0 ||
+        strcmp(argv[1], "--version")==0
+    )
     {
-        ret = write_memory(0x08000000, "blink-g0b.bin");
-        printf("WRITE MEMORY: %s\n", RET_CODE_STR[ret]);
+        printf("***Raspberry Pi-->STM32 Bootloader Driver Utility v0.9***\n\n");
+        printf("Supported commands:sync\n\nget\nread_file (file)\nwrite_file [file]\ntest\n");
+        return ret;
     }
-    else if (argc >= 2 && strcmp(argv[1], "commands") == 0)
+    else
     {
-        ret = bootloader_cmd_test(buff);
-        printf("List commands: %s\n", RET_CODE_STR[ret]);
-    }
-    else if (argc >= 2 && strcmp(argv[1], "test") == 0)
-    {
-        for (int i = 0; i < 100; i++)
+        configure_spi();
+        enter_bootloader();
+
+        if (strcmp(argv[1], "sync") == 0)
+        {
+
+        }
+        if (strcmp(argv[1], "get") == 0)
         {
             ret = bootloader_cmd_test(buff);
-            printf("(%d) commands: %s\n", i, RET_CODE_STR[ret]);
-            if (ret != RET_OK)
-                return RET_ERROR;
+            printf("get: %s\n", RET_CODE_STR[ret]);
+        }
+        else if (strcmp(argv[1], "read") == 0)
+        {
+
+            enter_bootloader();
+            ret = read_memory(0x08000000, FLASH_SIZE);
+            printf("READ MEMORY: %s\n", RET_CODE_STR[ret]);
+        }
+        else if (strcmp(argv[1], "write") == 0)
+        {
+            if (argc<3) re
+            enter_bootloader();
+            ret = write_memory(0x08000000, "blink-g0b.bin");
+            
+        }
+        else if (strcmp(argv[1], "test") == 0)
+        {
+            for (int i = 0; i < 100; i++)
+            {
+                ret = bootloader_cmd_test(buff);
+                printf("[%d] gets: %s\n", i, RET_CODE_STR[ret]);
+                if (ret != RET_OK) break;
+            }
+        }
+        else
+        {
+            printf("cmd '%s' not recognized\n", argv[1]);
         }
     }
-    else if (argc >= 2 && strcmp(argv[1], "read") == 0)
-    {
-        ret = read_memory(0x08000000, FLASH_SIZE);
-        printf("READ MEMORY: %s\n", RET_CODE_STR[ret]);
-    }
 
+    if ( (ret=bootloader_sync()) != RET_OK )
+    {
+        printf("ERROR: Cannot enter bootloader cmd loop: %s\n", RET_CODE_STR[ret]);
+    }
+    
     exit_bootloader();
-    return RET_OK;
+    cleanup_spi();
+    return ret;
 }
