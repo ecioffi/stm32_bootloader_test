@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h> //for strcmp for argv comparisons in main
+#include <getopt.h>
+#include <unistd.h>
+#include <stdbool.h>
 
 const int bcm_delay = 20; // microseconds
 const int poll_timeout = 256;
@@ -22,6 +25,9 @@ const uint8_t ZERO_BYTE = 0x00;
 #define FLASH_SIZE 512000
 #define RECV_BUFF_SIZE 512
 uint8_t RECV_BUFF[RECV_BUFF_SIZE];
+
+bool in_bootloader = false;
+bool spi_setup = false;
 
 enum RET_CODE
 {
@@ -441,12 +447,12 @@ void configure_spi()
     if (!bcm2835_init())
     {
         printf("bcm2835_init failed. Are you running as root??\n");
-        exit(1);
+        exit(RET_ERROR);
     }
     if (!bcm2835_spi_begin())
     {
         printf("bcm2835_spi_begin failed. Are you running as root??\n");
-        exit(1);
+        exit(RET_ERROR);
     }
 
     // The defaults
@@ -463,6 +469,8 @@ void configure_spi()
     {
         bcm2835_gpio_fsel(SPI_PINS[i], BCM2835_GPIO_FSEL_ALT0);
     }
+
+    spi_setup=true;
 }
 
 void cleanup_spi()
@@ -470,6 +478,7 @@ void cleanup_spi()
     printf("cleaning up and exiting...\n");
     bcm2835_spi_end();
     bcm2835_close();
+    spi_setup=false;
 }
 
 void enter_bootloader()
@@ -480,6 +489,7 @@ void enter_bootloader()
     bcm2835_delay(1000);
 
     restart_STM();
+    in_bootloader=true;
 }
 
 void exit_bootloader()
@@ -490,10 +500,91 @@ void exit_bootloader()
     bcm2835_delay(100);
 
     restart_STM();
+    in_bootloader=false;
+}
+
+void cleanup()
+{
+    if (in_bootloader) exit_bootloader();
+    if (spi_setup) cleanup_spi();
 }
 
 int main(int argc, char **argv)
 {
+    atexit(cleanup);
+    int c;
+    int digit_optind = 0;
+
+    while (1) {
+        int this_option_optind = optind ? optind : 1;
+        int option_index = 0;
+        static struct option long_options[] = {
+            {"add",     required_argument, 0,  0 },
+            {"append",  no_argument,       0,  0 },
+            {"delete",  required_argument, 0,  0 },
+            {"verbose", no_argument,       0,  0 },
+            {"write-file",   required_argument, 0, 'wgit status'},
+            {"file",    required_argument, 0,  0 },
+            {0,         0,                 0,  0 },
+            //{"help",    no_argument,       0, 'h'}
+        };
+
+        c = getopt_long(argc, argv, "abc:d:012", long_options, &option_index);
+        if (c == -1)
+            break;
+
+        switch (c) {
+        case 0:
+            printf("option %s", long_options[option_index].name);
+            if (optarg)
+                printf(" with arg %s", optarg);
+            printf("\n");
+            break;
+
+        case '0':
+        case '1':
+        case '2':
+            if (digit_optind != 0 && digit_optind != this_option_optind)
+                printf("digits occur in two different argv-elements.\n");
+            digit_optind = this_option_optind;
+            printf("option %c\n", c);
+            break;
+
+        case 'a':
+            printf("option a\n");
+            break;
+
+        case 'b':
+            printf("option b\n");
+            break;
+
+        case 'c':
+            printf("option c with value '%s'\n", optarg);
+            break;
+
+        case 'd':
+            printf("option d with value '%s'\n", optarg);
+            break;
+
+        case '?':
+            break;
+
+        default:
+            printf("?? getopt returned character code 0%o ??\n", c);
+        }
+    }
+
+    if (optind < argc) {
+        printf("non-option ARGV-elements: ");
+        while (optind < argc)
+            printf("%s ", argv[optind++]);
+        printf("\n");
+    }
+
+    exit(EXIT_SUCCESS);
+
+    exit(EXIT_SUCCESS);
+    #if 0
     enum RET_CODE ret = RET_OK;
     uint8_t buff[256] = {0};
 
@@ -533,7 +624,6 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[1], "write") == 0)
         {
-            if (argc<3) re
             enter_bootloader();
             ret = write_memory(0x08000000, "blink-g0b.bin");
             
@@ -558,7 +648,6 @@ int main(int argc, char **argv)
         printf("ERROR: Cannot enter bootloader cmd loop: %s\n", RET_CODE_STR[ret]);
     }
     
-    exit_bootloader();
-    cleanup_spi();
     return ret;
+    #endif
 }
