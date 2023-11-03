@@ -3,7 +3,7 @@
 #include <bcm2835.h> //for swap bytes w/ rasberry pi
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h> //for strcmp for argv comparisons in main
+#include <string.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <stdbool.h>
@@ -22,12 +22,14 @@ const uint8_t ACK_BYTE = 0x79;
 const uint8_t NACK_BYTE = 0x1F;
 const uint8_t ZERO_BYTE = 0x00;
 
+const uint32_t application_address=0x08000000;
 #define FLASH_SIZE 512000
-#define RECV_BUFF_SIZE 512
-uint8_t RECV_BUFF[RECV_BUFF_SIZE];
+// #define RECV_BUFF_SIZE 512
+// uint8_t RECV_BUFF[RECV_BUFF_SIZE];
 
 bool in_bootloader = false;
 bool spi_setup = false;
+bool verbose = false;
 
 enum RET_CODE
 {
@@ -47,24 +49,6 @@ const char *RET_CODE_STR[5] =
     "RET_ERROR"
 };
 
-/*
-void LOGGING_FUNCTION(int level, const char* func, const char* file, const char* line, const char* msg, ...)
-{
-    printf("[DEBUG%d %s:%d:%s]: %s", level, file, line, func);
-    printf(msg, ...);
-}
-
-#define DEBUG_LOG( level, ... ) \
-do \
-{ \
-    if ( ( level ) <= global_debug_level ) \
-    { \
-    LOGGING_FUNCTION( ( level ), __func__, __FILE__, __LINE__, __VA_ARGS__ ); \
-    } \
-} \
-while (0)
-*/
-
 uint8_t swap_byte_(const uint8_t send)
 {
     uint8_t recv = bcm2835_spi_transfer(send);
@@ -77,29 +61,21 @@ uint8_t recv_byte_() { return swap_byte_(DUMMY_BYTE); }
 uint8_t swap_byte(const uint8_t send)
 {
     uint8_t recv = swap_byte_(send);
-    if (1)
-    {
-        printf("Sent to SPI: 0x%02X. Read back from SPI: 0x%02X.\n", send, recv);
-    }
-
+    if (verbose) printf("Sent to SPI: 0x%02X. Read back from SPI: 0x%02X.\n", send, recv);
     return recv;
 }
 
 uint8_t recv_byte()
 {
     uint8_t recv = recv_byte_();
-    if (1)
-    {
-        printf("Read back from SPI: 0x%02X.\n", recv);
-    }
-
+    if (verbose) printf("Read back from SPI: 0x%02X.\n", recv);
     return recv;
 }
 
 uint8_t swap_byte_sel_print(const uint8_t send)
 {
     uint8_t recv = swap_byte_(send);
-    if (recv != DUMMY_BYTE && recv != 0)
+    if (recv != DUMMY_BYTE && recv != 0 && verbose)
     {
         printf("Sent to SPI: 0x%02X. Read back from SPI: 0x%02X.\n", send, recv);
     }
@@ -137,32 +113,44 @@ void read_df_into(uint8_t* recv_buff)
     recv_bytes_into(recv_buff, len);
 }
 
-void send_bytes(const uint8_t* send_buff, int len)
+/* send len number of bytes from buff and returns the xor of all sent bytes */
+uint8_t send_bytes(const uint8_t* send_buff, int len)
 {
     char send_str[1024];
     char recv_str[1024];
-
+    uint8_t xor = 0;
     for (int i = 0; i < len; i++)
     {
         uint8_t recv = swap_byte_(send_buff[i]);
+        xor ^= send_buff[i];
         sprintf(send_str + i * 3, "%02X ", send_buff[i]);
         sprintf(recv_str + i * 3, "%02X ", recv);
     }
 
     printf("Sent to SPI: 0x%s. Read back from SPI: 0x%s.\n", send_str, recv_str);
+    return xor;
 }
 
-uint8_t* recv_bytes(int len)
+/* sends len number of bytes and then the checksum of the data immediately after;
+   xor checksum is seeded with the parameter passed to the function
+*/
+void send_bytes_xor(const uint8_t* buff, int len, uint8_t xor)
 {
-    if (len > RECV_BUFF_SIZE)
-    {
-        printf("%s: Line %d: Buffer overflow error on \n", __FILE__, __LINE__);
-        exit(1);
-    }
-
-    recv_bytes_into(RECV_BUFF, len);
-    return RECV_BUFF;
+    xor ^= send_bytes(buff, len);
+    swap_byte(xor);
 }
+
+// uint8_t* recv_bytes(int len)
+// {
+//     if (len > RECV_BUFF_SIZE)
+//     {
+//         printf("%s: Line %d: Buffer overflow error on \n", __FILE__, __LINE__);
+//         exit(1);
+//     }
+
+//     recv_bytes_into(RECV_BUFF, len);
+//     return RECV_BUFF;
+// }
 
 /* sends specified byte until target or NACK byte is recieved */
 enum RET_CODE send_until_recv(uint8_t send, uint8_t target)
@@ -188,13 +176,6 @@ enum RET_CODE send_until_recv(uint8_t send, uint8_t target)
     return RET_TIMEOUT;
 }
 
-uint8_t get_xor(uint8_t* data, uint8_t len)
-{
-    uint8_t xor = 0;
-    for (int i = 0; i < len; i++) { xor ^= data[i]; }
-    return xor;
-}
-
 enum RET_CODE bootloader_get_ack()
 {
     enum RET_CODE ret;
@@ -214,28 +195,24 @@ enum RET_CODE bootloader_sync()
     enum RET_CODE ret;
 
     if ( (ret = send_until_recv(FRAME_BYTE, DUMMY_BYTE) ) != RET_OK) { return ret; }
-
     if ( (ret = bootloader_get_ack())  != RET_OK) { return ret; }
 
-    // printf("Bootloader sync successful\n");
+    printf("Bootloader sync successful\n");
     return RET_OK;
 }
 
-// const uint8_t* get_cmd_header(const uint8_t CMD_CODE)
-// {
-//     static uint8_t cmd_header[3];
-//     cmd_header = {FRAME_BYTE, CMD_CODE, CMD_CODE^0xFF};
-// }
-
-enum RET_CODE bootloader_cmd_test(uint8_t* buff)
+void send_cmd_header(const uint8_t CMD_CODE)
 {
-    const uint8_t CMD_CODE = 0x00;
-    const uint8_t CMD_HEADER[3] = {FRAME_BYTE, CMD_CODE, CMD_CODE ^ 0xFF};
-    enum RET_CODE ret;
-
-    printf("attempting bootloader command test procedure...\n");
-    
+    const uint8_t CMD_HEADER[3] = {FRAME_BYTE, CMD_CODE , CMD_CODE^0xFF};
     send_bytes(CMD_HEADER, sizeof(CMD_HEADER));
+}
+
+enum RET_CODE bootloader_cmd_get(uint8_t* buff)
+{
+    printf("attempting bootloader command get procedure...\n");
+    send_cmd_header(0x00);
+
+    enum RET_CODE ret;
     if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
     read_df_into(buff);
     if ((ret = bootloader_get_ack()) != RET_OK) { return ret; } // step6
@@ -246,185 +223,121 @@ enum RET_CODE bootloader_cmd_test(uint8_t* buff)
 enum RET_CODE bootloader_cmd_read_memory(uint32_t address, uint8_t* buff, uint8_t len_m1)
 {
     printf("Command: Read memory 0x11 beginning\n");
-    const uint8_t CMD_CODE = 0x11;
-    const uint8_t CMD_XOR  = CMD_CODE^0xFF;
-    const uint8_t CMD_HEADER[3] = {  };
+    send_cmd_header(0x11);
     enum RET_CODE ret;
 
-    swap_byte(FRAME_BYTE); // step1-start of frame
-    swap_byte(CMD_CODE);   // step2-send command
-    swap_byte(CMD_XOR);
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
 
-    // polling on step 4
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
-    printf("STEP 4 received ack...\n");
+    uint32_t address_endian = __builtin_bswap32(address);
+    send_bytes_xor((uint8_t*) &address_endian, sizeof(address_endian), 0);
 
-    uint8_t address_payload[5];
-    *((uint32_t *)&address_payload) = __builtin_bswap32(address);
-    address_payload[4] = get_xor((uint8_t* )&address, sizeof(address));
-    send_bytes(address_payload, sizeof(address_payload));
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
 
-    // polling on step 6
-    // swap_byte(ZERO_BYTE);
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
-    printf("STEP 6 received ack/nack...\n");
-
-    // send data frame --number of bytes to be read (1byte) & checksum (1byte)
     swap_byte(len_m1);
     swap_byte(len_m1 ^ 0xFF);
 
-    // polling on step 6
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+
     swap_byte(DUMMY_BYTE);
+    recv_bytes_into(buff, len_m1 + 1);
 
-    // receive data
-    printf("DATA READ BEGIN...\n");
-    for (int i = 0; i < len_m1 + 1; i++)
-    {
-        buff[i] = swap_byte(ZERO_BYTE);
-    }
-    printf("DATA READ END\n");
-
-    printf("WHAT WAS READ FROM STM MEMORY:  0x");
-    for (int i = 0; i < len_m1 + 1; i++)
-    {
-        printf("%02X", buff[i]);
-    }
-    printf("\n");
-
+    printf("Command: Read memory 0x11 done\n");
     return RET_OK;
 }
 
 enum RET_CODE bootloader_cmd_write_memory(uint32_t address, uint8_t* buff, uint8_t len_m1)
 {
     printf("Command: Write memory 0x31 beginning\n");
-    const uint8_t CMD_CODE = 0x31;
-    const uint8_t CMD_XOR = CMD_CODE ^ 0xFF;
+    send_cmd_header(0x31);
     enum RET_CODE ret;
 
-    swap_byte(FRAME_BYTE); // step1-start of frame
-    swap_byte(CMD_CODE);   // step2-send command
-    swap_byte(CMD_XOR);
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
 
-    // polling on step 4
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
-    printf("STEP 4 received ack...\n");
+    uint32_t address_endian = __builtin_bswap32(address);
+    send_bytes_xor((uint8_t*) &address_endian, sizeof(address_endian), 0);
 
-    uint8_t address_payload[5];
-    *((uint32_t *)&address_payload) = __builtin_bswap32(address);
-    address_payload[4] = get_xor((uint8_t* )&address, sizeof(address));
-    send_bytes(address_payload, sizeof(address_payload));
-
-    // polling on step 6
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
-    printf("STEP 6 received ack/nack...\n");
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
 
     // step 7-- send data frame --number of bytes to be written (1byte) & checksum (1byte)
-    uint8_t len_and_data_xor = len_m1;
     swap_byte(len_m1);
-    for (int i = 0; i < len_m1 + 1; i++)
-    {
-        swap_byte(buff[i]);
-        len_and_data_xor ^= buff[i];
-    }
-    swap_byte(len_and_data_xor);
+    send_bytes_xor(buff, len_m1+1, len_m1);
 
-    // polling on step 8
-    if ((ret = send_until_recv(DUMMY_BYTE, ACK_BYTE)) != RET_OK)
-    {
-        return ret;
-    }
-    swap_byte(ACK_BYTE);
-    swap_byte(DUMMY_BYTE);
+    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    //swap_byte(DUMMY_BYTE);
 
     return RET_OK;
 }
 
-enum RET_CODE read_memory(uint32_t memory_start, uint32_t length)
+enum RET_CODE read_memory(uint32_t address, uint8_t* buff, int len, int chunk)
 {
-    uint32_t cur_address = memory_start;
-    uint32_t end_address = memory_start + length;
-    uint8_t buff[FLASH_SIZE * 2] = {0};
-    int index = 0;
-    int outer_loop_iteration = 0;
-    int read_chunck_size = 256;
-    enum RET_CODE ret;
+    enum RET_CODE ret=RET_OK;
 
-    while (cur_address < end_address)
+    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
     {
-        printf("OUTER LOOP ITERATON: %i\n", outer_loop_iteration);
-        printf("BEGIN ADDRESS %08X ||| END ADDRESS %02X \n\n\n\n", cur_address, end_address);
-        if (cur_address + read_chunck_size > end_address)
+        printf("LOOP ITERATON: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", address, address+chunk);
+        if (address + chunk > end_address)
         {
-            read_chunck_size = end_address - cur_address;
+            chunk = end_address - address;
         }
-
-        if ((ret = bootloader_cmd_read_memory(cur_address, &buff[index], read_chunck_size - 1)) != RET_OK)
+        if ((ret = bootloader_cmd_read_memory(address, buff, chunk-1)) != RET_OK)
         {
             return ret;
         }
-        outer_loop_iteration += 1;
-        index += read_chunck_size;
-        cur_address += read_chunck_size;
     }
-    FILE *fptr = fopen("flash.bin", "w");
-    fwrite(buff, 1, length, fptr);
-    fclose(fptr);
-    return 0;
+
+    return ret;
 }
 
-enum RET_CODE write_memory(uint32_t memory_start, char *filename)
+enum RET_CODE write_memory(uint32_t address, uint8_t* buff, int len, int chunk)
 {
-    uint32_t cur_address = memory_start;
-    uint8_t buff[FLASH_SIZE * 2] = {0};
-    FILE *fptr = fopen(filename, "r");
-    size_t file_size_bytes = fread(buff, sizeof(uint8_t), sizeof(buff), fptr);
-    fclose(fptr);
-    uint32_t end_address = memory_start + file_size_bytes;
+    enum RET_CODE ret=RET_OK;
 
-    int index = 0;
-    int outer_loop_iteration = 0;
-    int write_chunck_size = 256;
-    int ret_val;
-
-    while (cur_address < end_address)
+    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
     {
-        printf("OUTER LOOP ITERATON: %i\n", outer_loop_iteration);
-        printf("BEGIN ADDRESS %08X ||| END ADDRESS %02X \n\n\n\n", cur_address, end_address);
-        if (cur_address + write_chunck_size > end_address)
+        printf("LOOP ITERATON: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", address, address+chunk);
+        if (address + chunk > end_address)
         {
-            write_chunck_size = end_address - cur_address;
+            chunk = end_address - address;
         }
-
-        if ((ret_val = bootloader_cmd_write_memory(cur_address, &buff[index], write_chunck_size - 1)) != RET_OK)
+        if ((ret = bootloader_cmd_write_memory(address, buff, chunk-1)) != RET_OK)
         {
-            return ret_val;
+            return ret;
         }
-        outer_loop_iteration += 1;
-        index += write_chunck_size;
-        cur_address += write_chunck_size;
     }
-    return 0;
+
+    return ret;
+}
+
+// TODO: implement erase function
+enum RET_CODE erase_memory()
+{
+    return RET_OK;
+}
+
+enum RET_CODE erase_write_and_verify_flash(uint32_t address, uint8_t* buff, int len, int chunk)
+{
+    enum RET_CODE ret=RET_OK;
+    
+    if ((ret=erase_memory)!=RET_OK) return ret;
+
+    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
+    {
+        printf("LOOP ITERATON: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", address, address+chunk);
+        
+        if (address + chunk > end_address) chunk=end_address-address;
+
+        if ((ret = bootloader_cmd_write_memory(address, buff, chunk-1)) != RET_OK) return ret;
+
+        static uint8_t cmp_buff[256];
+        if ((ret = bootloader_cmd_read_memory(address, cmp_buff, chunk-1)) != RET_OK) return ret;
+
+        if (memcmp(buff, cmp_buff, chunk)!=0) return RET_ERROR;
+    }
+
+    return ret;
 }
 
 void restart_STM()
@@ -509,145 +422,151 @@ void cleanup()
     if (spi_setup) cleanup_spi();
 }
 
+// TODO: update help output; add test functions; sanitize length input maybe?
+// ideads for tests: Get cmd loop; erase and verify, write random flash and verify; 
 int main(int argc, char **argv)
 {
     atexit(cleanup);
-    int c;
-    int digit_optind = 0;
 
-    while (1) {
-        int this_option_optind = optind ? optind : 1;
-        int option_index = 0;
-        static struct option long_options[] = {
-            {"add",     required_argument, 0,  0 },
-            {"append",  no_argument,       0,  0 },
-            {"delete",  required_argument, 0,  0 },
-            {"verbose", no_argument,       0,  0 },
-            {"write-file",   required_argument, 0, 'wgit status'},
-            {"file",    required_argument, 0,  0 },
-            {0,         0,                 0,  0 },
-            //{"help",    no_argument,       0, 'h'}
-        };
-
-        c = getopt_long(argc, argv, "abc:d:012", long_options, &option_index);
-        if (c == -1)
-            break;
-
-        switch (c) {
-        case 0:
-            printf("option %s", long_options[option_index].name);
-            if (optarg)
-                printf(" with arg %s", optarg);
-            printf("\n");
-            break;
-
-        case '0':
-        case '1':
-        case '2':
-            if (digit_optind != 0 && digit_optind != this_option_optind)
-                printf("digits occur in two different argv-elements.\n");
-            digit_optind = this_option_optind;
-            printf("option %c\n", c);
-            break;
-
-        case 'a':
-            printf("option a\n");
-            break;
-
-        case 'b':
-            printf("option b\n");
-            break;
-
-        case 'c':
-            printf("option c with value '%s'\n", optarg);
-            break;
-
-        case 'd':
-            printf("option d with value '%s'\n", optarg);
-            break;
-
-        case '?':
-            break;
-
-        default:
-            printf("?? getopt returned character code 0%o ??\n", c);
-        }
-    }
-
-    if (optind < argc) {
-        printf("non-option ARGV-elements: ");
-        while (optind < argc)
-            printf("%s ", argv[optind++]);
-        printf("\n");
-    }
-
-    exit(EXIT_SUCCESS);
-
-    exit(EXIT_SUCCESS);
-    #if 0
-    enum RET_CODE ret = RET_OK;
-    uint8_t buff[256] = {0};
-
-    if (argc==1 ||
-        strcmp(argv[1], "help")==0 ||
-        strcmp(argv[1], "-h")==0 ||
-        strcmp(argv[1], "--help")==0 ||
-        strcmp(argv[1], "version")==0 ||
-        strcmp(argv[1], "-v")==0 ||
-        strcmp(argv[1], "--version")==0
-    )
-    {
-        printf("***Raspberry Pi-->STM32 Bootloader Driver Utility v0.9***\n\n");
-        printf("Supported commands:sync\n\nget\nread_file (file)\nwrite_file [file]\ntest\n");
-        return ret;
-    }
-    else
-    {
-        configure_spi();
-        enter_bootloader();
-
-        if (strcmp(argv[1], "sync") == 0)
-        {
-
-        }
-        if (strcmp(argv[1], "get") == 0)
-        {
-            ret = bootloader_cmd_test(buff);
-            printf("get: %s\n", RET_CODE_STR[ret]);
-        }
-        else if (strcmp(argv[1], "read") == 0)
-        {
-
-            enter_bootloader();
-            ret = read_memory(0x08000000, FLASH_SIZE);
-            printf("READ MEMORY: %s\n", RET_CODE_STR[ret]);
-        }
-        else if (strcmp(argv[1], "write") == 0)
-        {
-            enter_bootloader();
-            ret = write_memory(0x08000000, "blink-g0b.bin");
-            
-        }
-        else if (strcmp(argv[1], "test") == 0)
-        {
-            for (int i = 0; i < 100; i++)
-            {
-                ret = bootloader_cmd_test(buff);
-                printf("[%d] gets: %s\n", i, RET_CODE_STR[ret]);
-                if (ret != RET_OK) break;
-            }
-        }
-        else
-        {
-            printf("cmd '%s' not recognized\n", argv[1]);
-        }
-    }
-
-    if ( (ret=bootloader_sync()) != RET_OK )
-    {
-        printf("ERROR: Cannot enter bootloader cmd loop: %s\n", RET_CODE_STR[ret]);
-    }
+    enum COMMAND {
+        NO_CMD,
+        OPT_VERBOSE='v',
+        OPT_CHUNK_SIZE='c',
+        OPT_ADDRESS='a',
+        OPT_LENGTH='l',
+        CMD_GET='g',
+        CMD_READ='r',
+        CMD_READ_MEMORY='R',
+        CMD_WRITE_FILE='w',
+        CMD_SYNC='s',
+        CMD_TEST='t',
+        CMD_HELP='h'
+    };
     
+    struct option long_options[] = {
+        {"verbose",     no_argument,       0,  OPT_VERBOSE     },
+        {"chunk-size",  required_argument, 0,  OPT_CHUNK_SIZE  },
+        {"address",     required_argument, 0,  OPT_ADDRESS     },
+        {"length",      required_argument, 0,  OPT_LENGTH      },
+        {"get-cmd",     no_argument,       0,  CMD_GET         },
+        {"read-cmd",    optional_argument, 0,  CMD_READ        },
+        {"read-memory", optional_argument, 0,  CMD_READ_MEMORY },
+        {"write-file",  required_argument, 0,  CMD_WRITE_FILE  },
+        {"sync",        no_argument,       0,  CMD_SYNC        },
+        {"test",        no_argument,       0,  CMD_TEST        },
+        {"help",        no_argument,       0,  CMD_HELP        },
+        {0, 0, 0, 0},
+    };
+
+    /* optional short options are a GNU extention.
+       The default behavior doesn't pick up an arg separated by a space,
+       so this macro fixes that
+    */
+    #define OPT_ARG_KLUDGE \
+    ((optarg == NULL && optind < argc && argv[optind][0] != '-') \
+     ? (bool) (optarg = argv[optind++]) \
+     : (optarg != NULL))
+
+    int c;
+    enum COMMAND cmd = NO_CMD;
+    int chunk_size=256;
+    uint32_t address=application_address;
+    uint32_t length=FLASH_SIZE;
+    char* filename=NULL;
+    while ((c = getopt_long(argc, argv, "vc:a:r::R::w:sthl:g", long_options, 0)) != -1 && c!=CMD_HELP)
+    {
+        switch (c)
+        {
+            case OPT_VERBOSE:
+                verbose=true;
+                break;
+            case OPT_CHUNK_SIZE:
+                chunk_size=atoi(optarg);
+                if (chunk_size>256) chunk_size=256;
+                if (chunk_size<1) chunk_size=1;
+                break;
+            case OPT_ADDRESS:
+                if (optarg) address=strtol(optarg, NULL, 0);
+                break;
+            case OPT_LENGTH:
+                if (optarg) length=strtol(optarg, NULL, 0);
+                break;
+            case CMD_READ:
+                if (OPT_ARG_KLUDGE) address=strtol(optarg, NULL, 0);
+                cmd = (cmd==NO_CMD)? c : CMD_HELP;
+                break;
+            case CMD_READ_MEMORY:
+                if (OPT_ARG_KLUDGE) filename=strdup(optarg);
+                cmd = (cmd==NO_CMD)? c : CMD_HELP;
+                break;
+            case CMD_WRITE_FILE:
+                filename=strdup(optarg);
+                cmd = (cmd==NO_CMD)? c : CMD_HELP;
+                break;
+            case CMD_SYNC:
+            case CMD_TEST:
+            case CMD_GET:
+                cmd = (cmd==NO_CMD)? c : CMD_HELP;
+                break;
+            case CMD_HELP:
+            default:
+                cmd = CMD_HELP;
+        }
+    }
+
+    if (cmd==NO_CMD || cmd==CMD_HELP)
+    {
+        printf("\n***Raspberry Pi-->STM32 Bootloader Driver Utility v0.9***\n\n");
+        printf("Supported commands:\n\n--sync\n--get\n--read-file [file]\n--write-file [file]\n--test\n");
+        return RET_OK;
+    }
+
+    configure_spi();
+    enter_bootloader();
+    enum RET_CODE ret = bootloader_sync();
+    if (ret!=RET_OK)
+    {
+        printf("bootloader sync failed with error: %s", RET_CODE_STR[ret]);
+        exit(ret);
+    }
+
+    uint8_t buff[FLASH_SIZE*2] = {0};
+    switch (cmd)
+    {
+        case CMD_SYNC:
+            // do nothing since we're already sync'd
+            break;
+        case CMD_READ:
+            ret = bootloader_cmd_read_memory(address, buff, chunk_size-1);
+            break;
+        case CMD_READ_MEMORY:
+            printf("filename: %s\n", filename);
+            ret = read_memory(address, buff, length, chunk_size);
+            if (filename)
+            {
+                FILE *fptr = fopen(filename, "w");
+                fwrite(buff, 1, length, fptr);
+                fclose(fptr);
+            }
+            break;
+        case CMD_WRITE_FILE:
+        {
+            FILE *fptr = fopen(filename, "r");
+            size_t len = fread(buff, 1, sizeof(buff), fptr);
+            ret = write_memory(address, buff, len, chunk_size);
+            fclose(fptr);
+            break;
+        }
+        case CMD_GET:
+            ret=bootloader_cmd_get(buff);
+            break;
+        case CMD_TEST:
+            printf("tests not implemented yet.\n");
+        default:
+            break; //should not get here
+    }
+
+    if (filename) free(filename);
+    printf("command executed with ret code: %s\n", RET_CODE_STR[ret]);
     return ret;
-    #endif
 }
