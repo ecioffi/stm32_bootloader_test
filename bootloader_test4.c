@@ -9,7 +9,7 @@
 #include <stdbool.h>
 
 const int bcm_delay = 20; // microseconds
-const int poll_timeout = 256;
+const int poll_timeout = 2048;
 const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
 
 const uint8_t BOOT0_PIN = 3;
@@ -18,9 +18,9 @@ const uint8_t SPI_PINS[4] = {8,9,10,11};
 
 const uint8_t DUMMY_BYTE = 0xA5;
 const uint8_t FRAME_BYTE = 0x5A;
-const uint8_t ACK_BYTE = 0x79;
-const uint8_t NACK_BYTE = 0x1F;
-const uint8_t ZERO_BYTE = 0x00;
+const uint8_t ACK_BYTE   = 0x79;
+const uint8_t NACK_BYTE  = 0x1F;
+const uint8_t ZERO_BYTE  = 0x00;
 
 const uint32_t application_address=0x08000000;
 #define FLASH_SIZE 512000
@@ -86,15 +86,16 @@ uint8_t swap_byte_sel_print(const uint8_t send)
 void recv_bytes_into(uint8_t* recv_buff, int len)
 {
     char recv_str[2048];
+    const int olm=20; //one line max bytes
 
     for (int i = 0; i < len; i++)
     {
         recv_buff[i] = recv_byte_();
-        char c0 = i%32==0 ? '\n' : ' '; 
+        char c0 = len>olm && i%32==0 ? '\n' : ' ';
         sprintf(recv_str+i*3, "%c%02X", c0, recv_buff[i]);
     }
 
-    char c1 = strlen(recv_str)>20? '\n' : ' ';
+    char c1 = strlen(recv_str)>olm ? '\n' : ' ';
     printf("Read back from SPI:%c0x %s.\n", c1, recv_str);
 }
 
@@ -122,13 +123,14 @@ uint8_t send_bytes(const uint8_t* send_buff, int len)
     char recv_str[2048]={0};
     char* recv_str_ = recv_str+1;
     uint8_t xor = 0;
+    const int olm=20; //one line max bytes
 
     for (int i = 0; i < len; i++)
     {
         uint8_t recv = swap_byte_(send_buff[i]);
         xor ^= send_buff[i];
         
-        char c0 = i%32==0 ? '\n' : ' '; 
+        char c0 = len>olm && i%32==0 ? '\n' : ' ';
         sprintf(send_str+i*3, "%c%02X", c0, send_buff[i]);
 
         if (recv != DUMMY_BYTE)
@@ -141,8 +143,8 @@ uint8_t send_bytes(const uint8_t* send_buff, int len)
         }
     }
 
-    char c1 = len>20? '\n' : ' ';
-    char c2 = strlen(recv_str)>20? '\n' : ' ';
+    char c1 = len>olm? '\n' : ' ';
+    char c2 = strlen(recv_str)>olm? '\n' : ' ';
     printf("Sent to SPI:%c0x%s.%c", c1,send_str,c1);
     printf("Read back from SPI:%c0x %s.\n", c2,recv_str+1);
     return xor;
@@ -157,37 +159,23 @@ void send_bytes_xor(const uint8_t* buff, int len, uint8_t xor)
     swap_byte(xor);
 }
 
-// uint8_t* recv_bytes(int len)
-// {
-//     if (len > RECV_BUFF_SIZE)
-//     {
-//         printf("%s: Line %d: Buffer overflow error on \n", __FILE__, __LINE__);
-//         exit(1);
-//     }
-
-//     recv_bytes_into(RECV_BUFF, len);
-//     return RECV_BUFF;
-// }
-
 /* sends specified byte until target or NACK byte is recieved */
 enum RET_CODE send_until_recv(uint8_t send, uint8_t target)
 {
     for (int t = 0; t < poll_timeout; t++)
     {
         uint8_t recv = swap_byte(send);
+        
+        /* check for target first in case we are polling for dummy byte */
         if (recv == target)
         {
-            printf("Poll complete--> 0x%02X.\n", recv);
+            printf("Poll complete [%i]--> 0x%02X.\n", t+1,recv);
             return RET_OK;
         }
-        if (recv == NACK_BYTE)
-        {
-            return RET_NACK;
-        }
-        if (recv == ACK_BYTE)
-        {
-            return RET_UNEXPECTED_BYTE;
-        }
+        
+        if (recv == DUMMY_BYTE) continue;
+
+        return recv==NACK_BYTE ? RET_NACK : RET_UNEXPECTED_BYTE;
     }
 
     return RET_TIMEOUT;
@@ -234,7 +222,7 @@ enum RET_CODE bootloader_cmd_get(uint8_t* buff)
     read_df_into(buff);
     if ((ret = bootloader_get_ack()) != RET_OK) { return ret; } // step6
 
-    printf("Command: Get 0x00 done OK...\n");
+    printf("Command: Get 0x00 done OK.\n");
     return RET_OK;
 }
 
@@ -265,7 +253,7 @@ enum RET_CODE bootloader_cmd_read(uint32_t address, uint8_t* buff, uint8_t len_m
 
 enum RET_CODE bootloader_cmd_write(uint32_t address, uint8_t* buff, uint8_t len_m1)
 {
-    printf("Command: Write 0x31 beginning\n");
+    printf("Command: Write 0x31 beginning...\n");
     send_cmd_header(0x31);
     enum RET_CODE ret;
 
@@ -551,7 +539,7 @@ int main(int argc, char **argv)
     enum RET_CODE ret = bootloader_sync();
     if (ret!=RET_OK)
     {
-        printf("bootloader sync failed with error: %s", RET_CODE_STR[ret]);
+        printf("Bootloader sync failed with error: %s\n\n", RET_CODE_STR[ret]);
         exit(ret);
     }
 
