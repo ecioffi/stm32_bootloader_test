@@ -23,9 +23,7 @@ const uint8_t NACK_BYTE  = 0x1F;
 const uint8_t ZERO_BYTE  = 0x00;
 
 const uint32_t application_address=0x08000000;
-#define FLASH_SIZE 512000
-// #define RECV_BUFF_SIZE 512
-// uint8_t RECV_BUFF[RECV_BUFF_SIZE];
+const uint32_t FLASH_SIZE=512000;
 
 bool in_bootloader = false;
 bool spi_setup = false;
@@ -112,7 +110,7 @@ void read_df_into(uint8_t* recv_buff)
 {
     swap_byte(DUMMY_BYTE);
     int len = swap_byte(DUMMY_BYTE)+1;
-    printf("read_df_into: len=%i\n", len);
+    //printf("read_df_into: len=%i\n", len);
     recv_bytes_into(recv_buff, len);
 }
 
@@ -222,7 +220,7 @@ enum RET_CODE bootloader_cmd_get(uint8_t* buff)
     read_df_into(buff);
     if ((ret = bootloader_get_ack()) != RET_OK) { return ret; } // step6
 
-    printf("Command: Get 0x00 done OK.\n");
+    printf("Command: Get 0x00 done OK.\n\n");
     return RET_OK;
 }
 
@@ -283,7 +281,7 @@ enum RET_CODE read_memory(uint32_t address, uint8_t* buff, int len, int chunk)
     for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
     {
         printf("LOOP ITERATON: %i\n", i);
-        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X\n\n", address, address+chunk);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X\n\n", address, address+chunk);
         if (address + chunk > end_address)
         {
             chunk = end_address - address;
@@ -322,8 +320,13 @@ enum RET_CODE write_memory(uint32_t address, uint8_t* buff, int len, int chunk)
 }
 
 // TODO: implement erase function
-enum RET_CODE erase_memory()
+enum RET_CODE bootloader_cmd_erase()
 {
+    printf("Command: Erase memory 0x44 beginning...\n");
+    send_cmd_header(0x31);
+    enum RET_CODE ret;
+
+    printf("Command: Erase memory 0x44 done OK.\n\n");
     return RET_OK;
 }
 
@@ -337,7 +340,7 @@ enum RET_CODE erase_write_and_verify_flash(uint32_t address, uint8_t* buff, int 
     for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
     {
         printf("LOOP ITERATON: %i\n", i);
-        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", address, address+chunk);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X \n\n", address, address+chunk);
         
         if (address + chunk > end_address) chunk=end_address-address;
 
@@ -429,10 +432,17 @@ void exit_bootloader()
     in_bootloader=false;
 }
 
+const int def_chunk_size=256;
+uint8_t* global_buff=NULL;
+char* filename=NULL;
+
 void cleanup()
 {
     if (in_bootloader) exit_bootloader();
     if (spi_setup) cleanup_spi();
+
+    if (filename) free(filename);
+    if (global_buff) free(global_buff);
 }
 
 // TODO: update help output; add test functions; sanitize length input maybe?
@@ -482,10 +492,10 @@ int main(int argc, char **argv)
 
     int c;
     enum ROUTINE rt = NO_RT;
-    int chunk_size=256;
+    int chunk_size=def_chunk_size;
     uint32_t address=application_address;
     uint32_t length=FLASH_SIZE;
-    char* filename=NULL;
+    
     while ((c = getopt_long(argc, argv, "vc:a:r::R::w:sthl:g", long_options, 0)) != -1 && c!=RT_HELP)
     {
         switch (c)
@@ -527,10 +537,28 @@ int main(int argc, char **argv)
         }
     }
 
+    // TODO bounds checking for length? what would happen if we tried to go out of bounds anyway?
+
     if (rt==NO_RT || rt==RT_HELP)
     {
-        printf("\n***Raspberry Pi-->STM32 Bootloader Driver Utility v0.9***\n\n");
-        printf("Supported routines:\n\n--sync\n--get\n--read-file [file]\n--write-file [file]\n--test\n");
+        printf("**********Raspberry Pi-->STM32 Bootloader Driver Utility v0.9**********\n");
+        printf("Supported routines:\n"
+                "\t-g | --get-cmd\n"
+                "\t-r | --read-cmd\n"
+                "\t-R | --read-memory  [file]\n"
+                "\t-w | --write-file   [opt. file]\n"
+                "\t-s | --sync\n"
+                "\t-t | --test\n"
+                "\t-h | --help\n\n"
+                "Supported options:\n"
+                "\t-v | --verbose\n"
+                "\t-c | --chunk-size   [def. %i]\n"
+                "\t-a | --address      [def. 0x%08X]\n"
+                "\t-l | --length       [def. %i]\n",
+                def_chunk_size,
+                application_address,
+                FLASH_SIZE
+        );
         return RET_OK;
     }
 
@@ -543,35 +571,35 @@ int main(int argc, char **argv)
         exit(ret);
     }
 
-    uint8_t buff[FLASH_SIZE*2] = {0};
+    global_buff = malloc(FLASH_SIZE);
     switch (rt)
     {
         case RT_SYNC:
             // do nothing since we're already sync'd
             break;
         case RT_READ:
-            ret = bootloader_cmd_read(address, buff, chunk_size-1);
+            ret = bootloader_cmd_read(address, global_buff, chunk_size-1);
             break;
         case RT_READ_MEMORY:
             printf("filename: %s\n", filename);
-            ret = read_memory(address, buff, length, chunk_size);
+            ret = read_memory(address, global_buff, length, chunk_size);
             if (filename)
             {
                 FILE *fptr = fopen(filename, "w");
-                fwrite(buff, 1, length, fptr);
+                fwrite(global_buff, 1, length, fptr);
                 fclose(fptr);
             }
             break;
         case RT_WRITE_FILE:
         {
             FILE *fptr = fopen(filename, "r");
-            size_t len = fread(buff, 1, sizeof(buff), fptr);
-            ret = write_memory(address, buff, len, chunk_size);
+            size_t len = fread(global_buff, 1, sizeof(global_buff), fptr);
+            ret = write_memory(address, global_buff, len, chunk_size);
             fclose(fptr);
             break;
         }
         case RT_GET:
-            ret=bootloader_cmd_get(buff);
+            ret=bootloader_cmd_get(global_buff);
             break;
         case RT_TEST:
             printf("tests not implemented yet.\n");
@@ -579,7 +607,6 @@ int main(int argc, char **argv)
             break; //should not get here
     }
 
-    if (filename) free(filename);
     printf("Routine executed with ret code: %s\n\n", RET_CODE_STR[ret]);
     return ret;
 }
