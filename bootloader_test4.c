@@ -9,18 +9,35 @@
 #include <stdbool.h>
 
 const int bcm_delay = 20; // microseconds
-const int poll_timeout = 2048;
+const int poll_timeout = 4096;
 const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
 
 const uint8_t BOOT0_PIN = 3;
 const uint8_t NRST_PIN = 4;
 const uint8_t SPI_PINS[4] = {8,9,10,11};
 
-const uint8_t DUMMY_BYTE = 0xA5;
-const uint8_t FRAME_BYTE = 0x5A;
-const uint8_t ACK_BYTE   = 0x79;
-const uint8_t NACK_BYTE  = 0x1F;
-const uint8_t ZERO_BYTE  = 0x00;
+enum MAGIC_BYTES
+{
+    DUMMY_BYTE = 0xA5,
+    FRAME_BYTE = 0x5A,
+    ACK_BYTE   = 0x79,
+    NACK_BYTE  = 0x1F,
+    ZERO_BYTE  = 0x00
+};
+
+enum CMD_CODES
+{
+    GET_CMD_CODE   = 0x00,
+    READ_CMD_CODE  = 0x11,
+    WRITE_CMD_CODE = 0x31,
+    ERASE_CMD_CODE = 0x44
+};
+
+// const uint8_t DUMMY_BYTE = 0xA5;
+// const uint8_t FRAME_BYTE = 0x5A;
+// const uint8_t ACK_BYTE   = 0x79;
+// const uint8_t NACK_BYTE  = 0x1F;
+// const uint8_t ZERO_BYTE  = 0x00;
 
 const uint32_t application_address=0x08000000;
 const uint32_t FLASH_SIZE=512000;
@@ -145,16 +162,8 @@ uint8_t send_bytes(const uint8_t* send_buff, int len)
     char c2 = strlen(recv_str)>olm? '\n' : ' ';
     printf("Sent to SPI:%c0x%s.%c", c1,send_str,c1);
     printf("Read back from SPI:%c0x %s.\n", c2,recv_str+1);
+    
     return xor;
-}
-
-/* sends len number of bytes and then the checksum of the data immediately after;
-   xor checksum is seeded with the parameter passed to the function
-*/
-void send_bytes_xor(const uint8_t* buff, int len, uint8_t xor)
-{
-    xor ^= send_bytes(buff, len);
-    swap_byte(xor);
 }
 
 /* sends specified byte until target or NACK byte is recieved */
@@ -162,7 +171,7 @@ enum RET_CODE send_until_recv(uint8_t send, uint8_t target)
 {
     for (int t = 0; t < poll_timeout; t++)
     {
-        uint8_t recv = swap_byte(send);
+        uint8_t recv = swap_byte_(send);
         
         /* check for target first in case we are polling for dummy byte */
         if (recv == target)
@@ -192,9 +201,46 @@ enum RET_CODE bootloader_get_ack()
     return swap_byte(ACK_BYTE)==DUMMY_BYTE ? RET_OK : RET_UNEXPECTED_BYTE;
 }
 
+/* Sends len number of bytes and then the checksum of the data immediately after;
+   (xor checksum is seeded with the xor parameter passed.)
+   Ack is then gotten.
+*/
+enum RET_CODE send_bytes_xor_ack_seeded(const uint8_t* buff, int len, uint8_t xor)
+{
+    printf("send_bytes_xor_ack_seeded: len=%i\n", len);
+    xor ^= send_bytes(buff, len);
+    swap_byte(xor);
+    return bootloader_get_ack();
+}
+
+/* Sends len number of bytes and then the checksum of the data immediately after;
+   Ack of xor checksum is then gotten
+*/
+enum RET_CODE send_bytes_xor_ack(const uint8_t* buff, int len)
+{
+    return send_bytes_xor_ack_seeded(buff, len, 0x00); // start xor at zero
+}
+
+/* Send byte with its checksum and get ack after
+*/
+enum RET_CODE send_byte_xor_ack(const uint8_t byte)
+{
+    return send_bytes_xor_ack_seeded(&byte, 1, 0xFF); // start xor at 0xFF for one byte
+}
+
+/* Sends a command header consisting of the FRAME_BYTE, command code, and its checksum.
+   After, acknowledgment is gotten.
+*/
+enum RET_CODE send_cmd_header_ack(const uint8_t cmd_code)
+{
+    swap_byte(FRAME_BYTE);
+    return send_byte_xor_ack(cmd_code);
+}
+
+
 enum RET_CODE bootloader_sync()
 {
-    printf("attempting bootloader sync procedure...\n");
+    printf("Attempting bootloader sync procedure...\n");
     enum RET_CODE ret;
 
     if ( (ret = send_until_recv(FRAME_BYTE, DUMMY_BYTE) ) != RET_OK) { return ret; }
@@ -204,112 +250,110 @@ enum RET_CODE bootloader_sync()
     return RET_OK;
 }
 
-void send_cmd_header(const uint8_t RT_CODE)
-{
-    const uint8_t RT_HEADER[3] = {FRAME_BYTE, RT_CODE , RT_CODE^0xFF};
-    send_bytes(RT_HEADER, sizeof(RT_HEADER));
-}
-
 enum RET_CODE bootloader_cmd_get(uint8_t* buff)
 {
-    printf("Command: Get 0x00 beginning...\n");
-    send_cmd_header(0x00);
-
+    printf("Command: Get 0x%02X beginning...\n", GET_CMD_CODE);
     enum RET_CODE ret;
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    
+    if ( (ret = send_cmd_header_ack(GET_CMD_CODE) ) != RET_OK) { return ret; }
+
     read_df_into(buff);
+
     if ((ret = bootloader_get_ack()) != RET_OK) { return ret; } // step6
 
-    printf("Command: Get 0x00 done OK.\n\n");
+    printf("Command: Get 0x%02X done OK.\n\n", GET_CMD_CODE);
     return RET_OK;
 }
 
 enum RET_CODE bootloader_cmd_read(uint32_t address, uint8_t* buff, uint8_t len_m1)
 {
-    printf("Command: Read 0x11 beginning...\n");
-    send_cmd_header(0x11);
+    printf("Command: Read 0x%02X beginning...\n", READ_CMD_CODE);
     enum RET_CODE ret;
 
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    if ( (ret = send_cmd_header_ack(READ_CMD_CODE) ) != RET_OK) { return ret; }
 
-    uint32_t address_endian = __builtin_bswap32(address);
-    send_bytes_xor((uint8_t*) &address_endian, sizeof(address_endian), 0);
+    uint32_t addr_ = __builtin_bswap32(address); // to get bytes in expected endianness order
+    if ( (ret = send_bytes_xor_ack((uint8_t*) &addr_, sizeof(addr_)) ) != RET_OK) { return ret; }
 
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
-
-    swap_byte(len_m1);
-    swap_byte(len_m1 ^ 0xFF);
-
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    if ( (ret = send_byte_xor_ack(len_m1)) != RET_OK) { return ret; }
 
     swap_byte(DUMMY_BYTE);
     recv_bytes_into(buff, len_m1 + 1);
 
-    printf("Command: Read 0x11 done OK.\n\n");
+    printf("Command: Read 0x%02X done OK.\n\n", READ_CMD_CODE);
     return RET_OK;
 }
 
 enum RET_CODE bootloader_cmd_write(uint32_t address, uint8_t* buff, uint8_t len_m1)
 {
-    printf("Command: Write 0x31 beginning...\n");
-    send_cmd_header(0x31);
+    printf("Command: Write 0x%02X beginning...\n", WRITE_CMD_CODE);
     enum RET_CODE ret;
 
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    if ( (ret = send_cmd_header_ack(WRITE_CMD_CODE) ) != RET_OK) { return ret; }
 
-    uint32_t address_endian = __builtin_bswap32(address);
-    send_bytes_xor((uint8_t*) &address_endian, sizeof(address_endian), 0);
-
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
+    uint32_t addr_ = __builtin_bswap32(address); // to get bytes in expected order
+    if ( (ret = send_bytes_xor_ack((uint8_t*) &addr_, sizeof(addr_)) ) != RET_OK) { return ret; }
 
     // step 7-- send data frame --number of bytes to be written (1byte) & checksum (1byte)
     swap_byte(len_m1);
-    send_bytes_xor(buff, len_m1+1, len_m1);
+    printf("cmd_write: sending buff...\n");
+    send_bytes_xor_ack_seeded(buff, len_m1+1, len_m1);
 
-    if ( (ret = bootloader_get_ack() ) != RET_OK) { return ret; }
-    //swap_byte(DUMMY_BYTE);
-
-    printf("Command: Write 0x31 done OK.\n\n");
+    printf("Command: Write 0x%02X done OK.\n\n", WRITE_CMD_CODE);
     return RET_OK;
 }
 
-enum RET_CODE read_memory(uint32_t address, uint8_t* buff, int len, int chunk)
+enum RET_CODE bootloader_cmd_erase_global()
+{
+    printf("Command: Erase memory 0x%02X special global beginning...\n", ERASE_CMD_CODE);
+    enum RET_CODE ret;
+
+    if ( (ret = send_cmd_header_ack(ERASE_CMD_CODE) ) != RET_OK) { return ret; }
+    
+    uint8_t SPECIAL_ERASE_CODE[] = {0xFF, 0xFF};
+    send_bytes_xor_ack(SPECIAL_ERASE_CODE, sizeof(SPECIAL_ERASE_CODE));
+
+    printf("Command: Erase memory 0x%02X special global done OK.\n\n", ERASE_CMD_CODE);
+    return RET_OK;
+}
+
+enum RET_CODE rt_read_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: Read memory beginning...\n");
     enum RET_CODE ret=RET_OK;
 
-    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
+    for (uint32_t i=0, end_addr=addr+len; addr<end_addr; i++, addr+=chunk_sz, buff+=chunk_sz)
     {
-        printf("LOOP ITERATON: %i\n", i);
-        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X\n\n", address, address+chunk);
-        if (address + chunk > end_address)
+        printf("LOOP ITERATION: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X\n\n", addr, addr+chunk_sz);
+        if (addr + chunk_sz > end_addr)
         {
-            chunk = end_address - address;
+            chunk_sz = end_addr - addr;
         }
-        if ((ret = bootloader_cmd_read(address, buff, chunk-1)) != RET_OK)
+        if ((ret = bootloader_cmd_read(addr, buff, chunk_sz-1)) != RET_OK)
         {
             return ret;
         }
     }
 
     printf("Routine: Read memory done OK.\n\n");
-    return ret;
+    return RET_OK;
 }
 
-enum RET_CODE write_memory(uint32_t address, uint8_t* buff, int len, int chunk)
+enum RET_CODE rt_write_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: Write memory beginning...\n");
     enum RET_CODE ret=RET_OK;
 
-    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
+    for (uint32_t i=0, end_addr=addr+len; addr<end_addr; i++, addr+=chunk_sz, buff+=chunk_sz)
     {
-        printf("LOOP ITERATON: %i\n", i);
-        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", address, address+chunk);
-        if (address + chunk > end_address)
+        printf("LOOP ITERATION: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%02X \n\n", addr, addr+chunk_sz);
+        if (addr + chunk_sz > end_addr)
         {
-            chunk = end_address - address;
+            chunk_sz = end_addr - addr;
         }
-        if ((ret = bootloader_cmd_write(address, buff, chunk-1)) != RET_OK)
+        if ((ret = bootloader_cmd_write(addr, buff, chunk_sz-1)) != RET_OK)
         {
             return ret;
         }
@@ -319,40 +363,46 @@ enum RET_CODE write_memory(uint32_t address, uint8_t* buff, int len, int chunk)
     return ret;
 }
 
-// TODO: implement erase function
-enum RET_CODE bootloader_cmd_erase()
+void wait_msg(int sec)
 {
-    printf("Command: Erase memory 0x44 beginning...\n");
-    send_cmd_header(0x31);
-    enum RET_CODE ret;
-
-    printf("Command: Erase memory 0x44 done OK.\n\n");
-    return RET_OK;
+    printf("waiting for ~%i seconds", sec);
+    for (int i=0; i<sec*2; i++)
+    {
+        putchar('.');
+        fflush(stdout);
+        bcm2835_delay(500);
+    }
+    printf("done\n");
 }
 
-enum RET_CODE erase_write_and_verify_flash(uint32_t address, uint8_t* buff, int len, int chunk)
+enum RET_CODE rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: erase_write_and_verify_flash memory beginning...\n");
     enum RET_CODE ret=RET_OK;
     
-    if ((ret=erase_memory())!=RET_OK) return ret;
+    if ((ret=bootloader_cmd_erase_global())!=RET_OK) return ret;
+    
+    //uint8_t dumbbuff[256];
+    //if ((ret=bootloader_cmd_get(dumbbuff))!=RET_OK) return ret;
+    
+    wait_msg(30);
 
-    for (uint32_t i=0, end_address=address+len; address<end_address; i++, address+=chunk, buff+=chunk)
+    for (uint32_t i=0, end_addr=addr+len; addr<end_addr; i++, addr+=chunk_sz, buff+=chunk_sz)
     {
-        printf("LOOP ITERATON: %i\n", i);
-        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X \n\n", address, address+chunk);
+        printf("LOOP ITERATION: %i\n", i);
+        printf("BEGIN ADDRESS 0x%08X ||| END ADDRESS 0x%08X \n\n", addr, addr+chunk_sz);
         
-        if (address + chunk > end_address) chunk=end_address-address;
+        if (addr + chunk_sz > end_addr) chunk_sz=end_addr-addr;
 
-        if ((ret = bootloader_cmd_write(address, buff, chunk-1)) != RET_OK) return ret;
+        if ((ret = bootloader_cmd_write(addr, buff, chunk_sz-1)) != RET_OK) return ret;
 
         static uint8_t cmp_buff[256];
-        if ((ret = bootloader_cmd_read(address, cmp_buff, chunk-1)) != RET_OK) return ret;
+        if ((ret = bootloader_cmd_read(addr, cmp_buff, chunk_sz-1)) != RET_OK) return ret;
 
-        if (memcmp(buff, cmp_buff, chunk)!=0) return RET_ERROR;
+        if (memcmp(buff, cmp_buff, chunk_sz)!=0) return RET_ERROR;
     }
 
-    printf("Routine: erase_write_and_verify_flash memory done OK...\n");
+    printf("Routine: erase_write_and_verify_flash memory done OK.\n");
     return RET_OK;
 }
 
@@ -445,7 +495,7 @@ void cleanup()
     if (global_buff) free(global_buff);
 }
 
-// TODO: update help output; add test functions; sanitize length input maybe?
+// TODO: add test functions; sanitize length input maybe?
 // ideads for tests: Get rt loop; erase and verify, write random flash and verify; 
 int main(int argc, char **argv)
 {
@@ -454,31 +504,35 @@ int main(int argc, char **argv)
     enum ROUTINE {
         NO_RT,
         OPT_VERBOSE='v',
-        OPT_CHUNK_SIZE='c',
+        OPT_CHUNK_SZ='c',
         OPT_ADDRESS='a',
         OPT_LENGTH='l',
-        RT_GET='g',
-        RT_READ='r',
-        RT_READ_MEMORY='R',
-        RT_WRITE_FILE='w',
+        RT_GET_CMD='g',
+        RT_READ_CMD='r',
+        RT_ERASE_CMD='e',
+        RT_READ='R',
+        RT_WRITE='w',
         RT_SYNC='s',
+        RT_ER_WT_VR='z',
         RT_TEST='t',
         RT_HELP='h'
     };
     
     struct option long_options[] = {
-        {"verbose",     no_argument,       0,  OPT_VERBOSE     },
-        {"chunk-size",  required_argument, 0,  OPT_CHUNK_SIZE  },
-        {"address",     required_argument, 0,  OPT_ADDRESS     },
-        {"length",      required_argument, 0,  OPT_LENGTH      },
-        {"get-cmd",     no_argument,       0,  RT_GET         },
-        {"read-cmd",    optional_argument, 0,  RT_READ        },
-        {"read-memory", optional_argument, 0,  RT_READ_MEMORY },
-        {"write-file",  required_argument, 0,  RT_WRITE_FILE  },
-        {"sync",        no_argument,       0,  RT_SYNC        },
-        {"test",        no_argument,       0,  RT_TEST        },
-        {"help",        no_argument,       0,  RT_HELP        },
-        {0, 0, 0, 0},
+        {"verbose",            no_argument,       0, OPT_VERBOSE  },
+        {"chunk-size",         required_argument, 0, OPT_CHUNK_SZ },
+        {"address",            required_argument, 0, OPT_ADDRESS  },
+        {"length",             required_argument, 0, OPT_LENGTH   },
+        {"get-cmd",            no_argument,       0, RT_GET_CMD   },
+        {"read-cmd",           optional_argument, 0, RT_READ_CMD  },
+        {"erase-cmd",          no_argument,       0, RT_ERASE_CMD },
+        {"read",               optional_argument, 0, RT_READ      },
+        {"write",              required_argument, 0, RT_WRITE     },
+        {"sync",               no_argument,       0, RT_SYNC      },
+        {"erase-write-verify", required_argument, 0, RT_ER_WT_VR  },
+        {"test",               no_argument,       0, RT_TEST      },
+        {"help",               no_argument,       0, RT_HELP      },
+        {0,0,0,0},
     };
 
     /* optional short options are a GNU extention.
@@ -492,21 +546,21 @@ int main(int argc, char **argv)
 
     int c;
     enum ROUTINE rt = NO_RT;
-    int chunk_size=def_chunk_size;
+    int chunk_sz=def_chunk_size;
     uint32_t address=application_address;
     uint32_t length=FLASH_SIZE;
     
-    while ((c = getopt_long(argc, argv, "vc:a:r::R::w:sthl:g", long_options, 0)) != -1 && c!=RT_HELP)
+    while ((c = getopt_long(argc, argv, "vc:a:l:gr::eR::w:sz:th", long_options, 0)) != -1 && c!=RT_HELP)
     {
         switch (c)
         {
             case OPT_VERBOSE:
                 verbose=true;
                 break;
-            case OPT_CHUNK_SIZE:
-                chunk_size=atoi(optarg);
-                if (chunk_size>256) chunk_size=256;
-                if (chunk_size<1) chunk_size=1;
+            case OPT_CHUNK_SZ:
+                chunk_sz=atoi(optarg);
+                if (chunk_sz>256) chunk_sz=256;
+                if (chunk_sz<1) chunk_sz=1;
                 break;
             case OPT_ADDRESS:
                 if (optarg) address=strtol(optarg, NULL, 0);
@@ -514,21 +568,20 @@ int main(int argc, char **argv)
             case OPT_LENGTH:
                 if (optarg) length=strtol(optarg, NULL, 0);
                 break;
-            case RT_READ:
+            case RT_READ_CMD:
                 if (OPT_ARG_KLUDGE) address=strtol(optarg, NULL, 0);
                 rt = (rt==NO_RT)? c : RT_HELP;
                 break;
-            case RT_READ_MEMORY:
+            case RT_READ:
+            case RT_WRITE:
+            case RT_ER_WT_VR:
                 if (OPT_ARG_KLUDGE) filename=strdup(optarg);
-                rt = (rt==NO_RT)? c : RT_HELP;
-                break;
-            case RT_WRITE_FILE:
-                filename=strdup(optarg);
                 rt = (rt==NO_RT)? c : RT_HELP;
                 break;
             case RT_SYNC:
             case RT_TEST:
-            case RT_GET:
+            case RT_GET_CMD:
+            case RT_ERASE_CMD:
                 rt = (rt==NO_RT)? c : RT_HELP;
                 break;
             case RT_HELP:
@@ -545,8 +598,9 @@ int main(int argc, char **argv)
         printf("Supported routines:\n"
                 "\t-g | --get-cmd\n"
                 "\t-r | --read-cmd\n"
-                "\t-R | --read-memory  [file]\n"
-                "\t-w | --write-file   [opt. file]\n"
+                "\t-e | --erase-cmd\n"
+                "\t-R | --read         [file]\n"
+                "\t-w | --write        [opt. file]\n"
                 "\t-s | --sync\n"
                 "\t-t | --test\n"
                 "\t-h | --help\n\n"
@@ -577,12 +631,18 @@ int main(int argc, char **argv)
         case RT_SYNC:
             // do nothing since we're already sync'd
             break;
-        case RT_READ:
-            ret = bootloader_cmd_read(address, global_buff, chunk_size-1);
+        case RT_GET_CMD:
+            ret=bootloader_cmd_get(global_buff);
             break;
-        case RT_READ_MEMORY:
+        case RT_ERASE_CMD:
+            ret=bootloader_cmd_erase_global();
+            break;
+        case RT_READ_CMD:
+            ret = bootloader_cmd_read(address, global_buff, chunk_sz-1);
+            break;
+        case RT_READ:
             printf("filename: %s\n", filename);
-            ret = read_memory(address, global_buff, length, chunk_size);
+            ret = rt_read_memory(address, global_buff, length, chunk_sz);
             if (filename)
             {
                 FILE *fptr = fopen(filename, "w");
@@ -590,17 +650,17 @@ int main(int argc, char **argv)
                 fclose(fptr);
             }
             break;
-        case RT_WRITE_FILE:
+        case RT_WRITE:
+        case RT_ER_WT_VR:
         {
             FILE *fptr = fopen(filename, "r");
-            size_t len = fread(global_buff, 1, sizeof(global_buff), fptr);
-            ret = write_memory(address, global_buff, len, chunk_size);
+            size_t len = fread(global_buff, 1, FLASH_SIZE, fptr);
+            ret = rt==RT_WRITE ? 
+                rt_write_memory(address, global_buff, len, chunk_sz) :
+                rt_erase_write_verify(address, global_buff, len, chunk_sz);
             fclose(fptr);
             break;
         }
-        case RT_GET:
-            ret=bootloader_cmd_get(global_buff);
-            break;
         case RT_TEST:
             printf("tests not implemented yet.\n");
         default:
