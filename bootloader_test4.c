@@ -529,7 +529,7 @@ void cleanup()
 }
 
 // TODO: add test functions; sanitize length input maybe?
-// ideads for tests: Get rt loop; erase and verify, write random flash and verify; 
+// ideas for tests: Get rt loop; erase and verify, write random flash and verify; 
 int main(int argc, char **argv)
 {
     atexit(cleanup);
