@@ -552,12 +552,12 @@ int main(int argc, char **argv)
     };
     
     struct option long_options[] = {
-        {"verbose",            VERBOSITY_MAX,     0, OPT_VERBOSE  },
+        {"verbose",            optional_argument, 0, OPT_VERBOSE  },
         {"chunk-size",         required_argument, 0, OPT_CHUNK_SZ },
         {"address",            required_argument, 0, OPT_ADDRESS  },
         {"length",             required_argument, 0, OPT_LENGTH   },
         {"get-cmd",            no_argument,       0, RT_GET_CMD   },
-        {"read-cmd",           VERBOSITY_MAX, 0, RT_READ_CMD  },
+        {"read-cmd",           optional_argument, 0, RT_READ_CMD  },
         {"erase-cmd",          no_argument,       0, RT_ERASE_CMD },
         {"read",               optional_argument, 0, RT_READ      },
         {"write",              required_argument, 0, RT_WRITE     },
