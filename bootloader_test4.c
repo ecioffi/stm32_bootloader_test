@@ -27,10 +27,10 @@ enum RASPI_PINS
 {
     BOOT0_PIN    = 3,
     NRST_PIN     = 4,
-    // SPI_CS_PIN   = 8,
-    // SPI_MISO_PIN = 9,
-    // SPI_MOSI_PIN = 10,
-    // SPI_CLK_PIN  = 11
+    SPI_CS_PIN   = 8,
+    SPI_MISO_PIN = 9,
+    SPI_MOSI_PIN = 10,
+    SPI_CLK_PIN  = 11
 };
 
 enum MAGIC_BYTES
@@ -463,20 +463,50 @@ enum RET_CODE rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int c
 
 void gpio_write(int pin, bool value)
 {
-    struct gpiohandle_request rq = {.lineoffsets[0]=pin, .flags=GPIOHANDLE_REQUEST_OUTPUT, .lines=1};
-    struct gpiohandle_data data = {.values[0]=value};
+    struct gpio_v2_line_request rq = {
+        .offsets[0]=pin,
+        .consumer="stmbl",
+        .num_lines=1,
+        .config= {
+            .flags=GPIO_V2_LINE_FLAG_OUTPUT
+    }};
+    struct gpio_v2_line_values lv = {.bits=value, .mask=1};
 
-    if (ioctl(gpio_fd, GPIO_GET_LINEHANDLE_IOCTL, &rq) == -1)
+    if (ioctl(gpio_fd, GPIO_V2_GET_LINE_IOCTL, &rq) == -1 || rq.fd<0)
     {
-        printf("Unable to get line handle from ioctl : %s\n", strerror(errno));
+        printf("Unable to get line handle from ioctl for pin %d: %s\n", pin, strerror(errno));
         exit(RET_HOST_ERR);
     }
 
-    int code = ioctl(rq.fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data);
+    int code = ioctl(rq.fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &lv);
     close(rq.fd);
     if (code == -1)
     {
-        printf("Unable to set line value using ioctl : %s\n", strerror(errno));
+        printf("Unable to set line value using ioctl for pin %d: %s\n", pin, strerror(errno));
+        exit(RET_HOST_ERR);
+    }
+}
+
+void gpio_reset(int pin)
+{
+    struct gpio_v2_line_request rq = {
+        .offsets[0]=pin,
+        .consumer="stmbl",
+        .num_lines=1
+    };
+    struct gpio_v2_line_config config = {.flags=4, .num_attrs=0};
+
+    if (ioctl(gpio_fd, GPIO_V2_GET_LINE_IOCTL, &rq) == -1 || rq.fd<0)
+    {
+        printf("Unable to get line handle from ioctl for pin %d: %s\n", pin, strerror(errno));
+        exit(RET_HOST_ERR);
+    }
+
+    int code = ioctl(rq.fd, GPIO_V2_LINE_SET_CONFIG_IOCTL, &config);
+    close(rq.fd);
+    if (code == -1)
+    {
+        printf("Unable to set line config using ioctl for pin %d: %s\n", pin, strerror(errno));
         exit(RET_HOST_ERR);
     }
 }
@@ -498,6 +528,14 @@ void restart_STM()
 
 void configure_host()
 {
+    enum RASPI_PINS SPI_PINS[] = {SPI_CS_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CLK_PIN};
+    char cmd[100] = {0};
+    for (int i=0; i<sizeof(SPI_PINS)/sizeof(enum RASPI_PINS); i++)
+    {
+        sprintf(cmd, "pinctrl set %d a0", SPI_PINS[i]);
+        system(cmd);
+    }
+
     if ((spi_fd = open(spi_device, O_RDWR)) < 0)
     {
         printf("Unable to open spi device %s: %s\n", spi_device, strerror(errno));
@@ -518,11 +556,11 @@ void configure_host()
     }
 
     struct gpiochip_info info;
-    struct gpioline_info line_info = {.line_offset=8}; // cs0 gpio pin
+    struct gpio_v2_line_info line_info = {.offset=8}; // cs0 gpio pin
 
-    if (ioctl(gpio_fd, GPIO_GET_LINEINFO_IOCTL, &line_info) == -1)
+    if (ioctl(gpio_fd, GPIO_V2_GET_LINEINFO_IOCTL, &line_info) == -1)
     {
-        printf("Unable to get line info from offset %d: %s\n", line_info.line_offset, strerror(errno));
+        printf("Unable to get line info from offset %d: %s\n", line_info.offset, strerror(errno));
         exit(RET_ERR);
     }
 
@@ -531,6 +569,16 @@ void configure_host()
         printf("PIN%d consumer '%s' != '%s'; gpio dev sanity check failed!\n");
         exit(RET_ERR);
     }
+
+    // //gpio_set_hi_z(SPI_CS_PIN);
+    // gpio_set_hi_z(SPI_MISO_PIN);
+    // gpio_set_hi_z(SPI_MOSI_PIN);
+    // gpio_set_hi_z(SPI_CLK_PIN);
+
+    //gpio_reset(SPI_CS_PIN);
+
+
+
 }
 
 void enter_bootloader()
@@ -549,9 +597,13 @@ void exit_bootloader()
     printf("setting boot0-pin low...");
     gpio_write(BOOT0_PIN, 0);
     printf("done\n");
-    usleep(100000);
+    sleep(1);
 
     restart_STM();
+    //gpio_reset(SPI_CS_PIN);
+    gpio_reset(SPI_MISO_PIN);
+    gpio_reset(SPI_MOSI_PIN);
+    gpio_reset(SPI_CLK_PIN);
     in_bootloader=false;
 }
 
