@@ -2,26 +2,35 @@
 // TODO: split up into four? files: test_prog.c test_prog.h raspi.h bl.h ?
 
 // AN4286 has figures
-#include <bcm2835.h> //for swap bytes w/ rasberry pi
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <errno.h>
 
-const int bcm_delay = 20; // microseconds
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/spi/spidev.h>
+#include <linux/gpio.h>
+
+const char* spi_device = "/dev/spidev0.0";
+const char* gpio_device = "/dev/gpiochip4";
+const int spi_delay = 10; // microseconds
 const int poll_timeout = 4096;
-const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
+const int spi_hz_max = 2000000;
+//const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
 
 enum RASPI_PINS
 {
     BOOT0_PIN    = 3,
     NRST_PIN     = 4,
-    SPI_CS_PIN   = 8,
-    SPI_MISO_PIN = 9,
-    SPI_MOSI_PIN = 10,
-    SPI_CLK_PIN  = 11
+    // SPI_CS_PIN   = 8,
+    // SPI_MISO_PIN = 9,
+    // SPI_MOSI_PIN = 10,
+    // SPI_CLK_PIN  = 11
 };
 
 enum MAGIC_BYTES
@@ -51,8 +60,8 @@ enum VERBOSITY
 const uint32_t application_address=0x08000000;
 const uint32_t FLASH_SIZE=512000;
 
+int spi_fd=-1, gpio_fd=-1;
 bool in_bootloader = false;
-bool spi_setup = false;
 enum VERBOSITY verbose = VERBOSITY_QUIET;
 
 enum RET_CODE
@@ -61,22 +70,37 @@ enum RET_CODE
     RET_UNEXPECTED_BYTE,
     RET_NACK,
     RET_TIMEOUT,
-    RET_ERROR
+    RET_ERR,
+    RET_HOST_ERR
 };
 
-const char *RET_CODE_STR[5] =
+const char *RET_CODE_STR[] =
 {
     "RET_OK",
     "RET_UNEXPECTED_BYTE",
     "RET_NACK",
     "RET_TIMEOUT",
-    "RET_ERROR"
+    "RET_ERR",
+    "RET_HOST_ERR"
 };
 
 uint8_t swap_byte_(const uint8_t send)
 {
-    uint8_t recv = bcm2835_spi_transfer(send);
-    bcm2835_st_delay(0, bcm_delay);
+    static uint8_t recv;
+    static struct spi_ioc_transfer tr = {
+		.rx_buf = (uint64_t) &recv,
+		.len = 1,
+		.delay_usecs = spi_delay,
+		.speed_hz = spi_hz_max,
+		.bits_per_word = 8,
+	};
+    tr.tx_buf = (uint64_t) &send;
+    
+    if (ioctl(spi_fd, SPI_IOC_MESSAGE(1), &tr) == -1)
+    {
+        printf("Unable to write to spi via ioctl: %s\n", strerror(errno));
+        exit(RET_HOST_ERR);
+    }
     return recv;
 }
 
@@ -430,75 +454,91 @@ enum RET_CODE rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int c
         static uint8_t cmp_buff[256];
         if ((ret = bl_cmd_read(addr, cmp_buff, chunk_sz-1)) != RET_OK) return ret;
 
-        if (memcmp(buff, cmp_buff, chunk_sz)!=0) return RET_ERROR;
+        if (memcmp(buff, cmp_buff, chunk_sz)!=0) return RET_ERR;
     }
 
     printf("Routine: erase_write_and_verify_flash memory done OK.\n");
     return RET_OK;
 }
 
+void gpio_write(int pin, bool value)
+{
+    struct gpiohandle_request rq = {.lineoffsets[0]=pin, .flags=GPIOHANDLE_REQUEST_OUTPUT, .lines=1};
+    struct gpiohandle_data data = {.values[0]=value};
+
+    if (ioctl(gpio_fd, GPIO_GET_LINEHANDLE_IOCTL, &rq) == -1)
+    {
+        printf("Unable to get line handle from ioctl : %s\n", strerror(errno));
+        exit(RET_HOST_ERR);
+    }
+
+    int code = ioctl(rq.fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data);
+    close(rq.fd);
+    if (code == -1)
+    {
+        printf("Unable to set line value using ioctl : %s\n", strerror(errno));
+        exit(RET_HOST_ERR);
+    }
+}
+
 void restart_STM()
 {
     printf("setting reset-pin low...");
-    bcm2835_gpio_write(NRST_PIN, 0);
+    gpio_write(NRST_PIN, 0);
     printf("done\n");
 
-    bcm2835_delay(100);
+    usleep(100000);
 
     printf("setting reset-pin high...");
-    bcm2835_gpio_write(NRST_PIN, 1);
+    gpio_write(NRST_PIN, 1);
     printf("done\n");
 
-    bcm2835_delay(1000);
+    sleep(1);
 }
 
-void configure_spi()
+void configure_host()
 {
-    if (!bcm2835_init())
+    if ((spi_fd = open(spi_device, O_RDWR)) < 0)
     {
-        printf("bcm2835_init failed. Are you running as root??\n");
-        exit(RET_ERROR);
-    }
-    if (!bcm2835_spi_begin())
-    {
-        printf("bcm2835_spi_begin failed. Are you running as root??\n");
-        exit(RET_ERROR);
+        printf("Unable to open spi device %s: %s\n", spi_device, strerror(errno));
+        exit(RET_HOST_ERR);
     }
 
-    // The defaults besides clock divider
-    bcm2835_spi_setBitOrder(BCM2835_SPI_BIT_ORDER_MSBFIRST);
-    bcm2835_spi_setDataMode(BCM2835_SPI_MODE0);
-    bcm2835_spi_setClockDivider(spi_clk_div);
-    bcm2835_spi_chipSelect(BCM2835_SPI_CS0);
-    bcm2835_spi_setChipSelectPolarity(BCM2835_SPI_CS0, LOW);
-
-    bcm2835_gpio_fsel(BOOT0_PIN, BCM2835_GPIO_FSEL_OUTP);
-    bcm2835_gpio_fsel(NRST_PIN, BCM2835_GPIO_FSEL_OUTP);
-
-    const enum RASPI_PINS SPI_PINS[] = { SPI_CS_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CLK_PIN };
-    for (int i=0; i<sizeof(SPI_PINS)/sizeof(SPI_PINS[0]); i++)
+    int mode = SPI_MODE_0;
+    if (ioctl(spi_fd, SPI_IOC_WR_MODE32, &mode) == -1)
     {
-        //printf("setting SPI_PINS[%i] --- %i\n", i, SPI_PINS[i]);
-        bcm2835_gpio_fsel(SPI_PINS[i], BCM2835_GPIO_FSEL_ALT0);
+        printf("Unabled to set SPI_MODE_0: %s\n", strerror(errno));
+        exit(RET_HOST_ERR);
     }
 
-    spi_setup=true;
-}
+    if ((gpio_fd = open(gpio_device, O_RDONLY)) < 0)
+    {
+        printf("Unabled to open gpio device %s: %s\n", gpio_device, strerror(errno));
+        exit(RET_HOST_ERR);
+    }
 
-void cleanup_spi()
-{
-    printf("cleaning up and exiting...\n");
-    bcm2835_spi_end();
-    bcm2835_close();
-    spi_setup=false;
+    struct gpiochip_info info;
+    struct gpioline_info line_info = {.line_offset=8}; // cs0 gpio pin
+
+    if (ioctl(gpio_fd, GPIO_GET_LINEINFO_IOCTL, &line_info) == -1)
+    {
+        printf("Unable to get line info from offset %d: %s\n", line_info.line_offset, strerror(errno));
+        exit(RET_ERR);
+    }
+
+    if (strcmp("spi0 CS0", line_info.consumer) != 0)
+    {
+        printf("PIN%d consumer '%s' != '%s'; gpio dev sanity check failed!\n");
+        exit(RET_ERR);
+    }
 }
 
 void enter_bootloader()
 {
     printf("setting boot0-pin high...");
-    bcm2835_gpio_write(BOOT0_PIN, 1);
+    gpio_write(BOOT0_PIN, 1);
     printf("done\n");
-    bcm2835_delay(1000);
+    sleep(1);
 
     restart_STM();
     in_bootloader=true;
@@ -507,9 +547,9 @@ void enter_bootloader()
 void exit_bootloader()
 {
     printf("setting boot0-pin low...");
-    bcm2835_gpio_write(BOOT0_PIN, 0);
+    gpio_write(BOOT0_PIN, 0);
     printf("done\n");
-    bcm2835_delay(100);
+    usleep(100000);
 
     restart_STM();
     in_bootloader=false;
@@ -522,7 +562,9 @@ char* filename=NULL;
 void cleanup()
 {
     if (in_bootloader) exit_bootloader();
-    if (spi_setup) cleanup_spi();
+    printf("cleaning up and exiting...\n");
+    if (spi_fd!=-1) close(spi_fd);
+    if (gpio_fd!=-1) close(gpio_fd);
 
     if (filename) free(filename);
     if (global_buff) free(global_buff);
@@ -652,7 +694,7 @@ int main(int argc, char **argv)
         return RET_OK;
     }
 
-    configure_spi();
+    configure_host();
     enter_bootloader();
     enum RET_CODE ret = bl_sync();
     if (ret!=RET_OK)
