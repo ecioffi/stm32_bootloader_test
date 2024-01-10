@@ -16,17 +16,20 @@
 #include <linux/spi/spidev.h>
 #include <linux/gpio.h>
 
+#ifndef STM_BL_DEBUG
 #define STM_BL_DEBUG
-#include "stmbl_base.h"
+#endif
+#include "stm_bl_base.h"
 
 const char* spi_device = "/dev/spidev0.0";
 const char* gpio_device = "/dev/gpiochip4";
 const int spi_delay = 10; // microseconds
-
 const int spi_hz_max = 2000000;
-//const uint16_t spi_clk_div = BCM2835_SPI_CLOCK_DIVIDER_128; //BCM2835_SPI_CLOCK_DIVIDER_65536;
 
-enum RASPI_PINS
+const uint32_t application_address=0x08000000;
+const uint32_t FLASH_SIZE=512000;
+
+typedef enum
 {
     BOOT0_PIN    = 3,
     NRST_PIN     = 4,
@@ -34,13 +37,13 @@ enum RASPI_PINS
     SPI_MISO_PIN = 9,
     SPI_MOSI_PIN = 10,
     SPI_CLK_PIN  = 11
-};
+} RASPI_PIN;
 
 int spi_fd=-1, gpio_fd=-1;
 bool in_bootloader = false;
-enum VERBOSITY verbose = VERBOSITY_QUIET;
+VERBOSITY verbose = VERBOSITY_QUIET;
 
-int8_t swap_byte_(const uint8_t send)
+int8_t stm_swap_byte_(const uint8_t send)
 {
     static uint8_t recv;
     static struct spi_ioc_transfer tr = {
@@ -60,30 +63,30 @@ int8_t swap_byte_(const uint8_t send)
     return recv;
 }
 
-uint8_t swap_byte(const uint8_t send)
+uint8_t stm_swap_byte(const uint8_t send)
 {
-    uint8_t recv = swap_byte_(send);
+    uint8_t recv = stm_swap_byte_(send);
     if (verbose) printf("Sent to SPI: 0x%02X. Read back from SPI: 0x%02X.\n", send, recv);
     return recv;
 }
 
-uint8_t recv_byte_() { return swap_byte_(DUMMY_BYTE); }
+uint8_t stm_recv_byte_() { return stm_swap_byte_(DUMMY_BYTE); }
 
-uint8_t recv_byte()
+uint8_t stm_recv_byte()
 {
-    uint8_t recv = recv_byte_();
+    uint8_t recv = stm_recv_byte_();
     if (verbose) printf("Read back from SPI: 0x%02X.\n", recv);
     return recv;
 }
 
-void recv_bytes_into(uint8_t* recv_buff, int len)
+void stm_recv_bytes_into(uint8_t* recv_buff, int len)
 {
     char recv_str[2048];
     const int olm=20; //one line max bytes
 
     for (int i = 0; i < len; i++)
     {
-        recv_buff[i] = recv_byte_();
+        recv_buff[i] = stm_recv_byte_();
         char c0 = len>olm && i%32==0 ? '\n' : ' ';
         sprintf(recv_str+i*3, "%c%02X", c0, recv_buff[i]);
     }
@@ -97,10 +100,10 @@ void recv_bytes_into(uint8_t* recv_buff, int len)
    (max 256 although there is no bounds checking, so behavior outside would be undefined.)
    Read data is copied into specified buffer.
 */
-enum RET_CODE rt_read_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
+STM_BL_RET rt_read_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: Read memory beginning...\n");
-    enum RET_CODE ret=RET_OK;
+    STM_BL_RET ret=RET_OK;
 
     for (uint32_t i=0, end_addr=addr+len; addr<end_addr; i++, addr+=chunk_sz, buff+=chunk_sz)
     {
@@ -110,7 +113,7 @@ enum RET_CODE rt_read_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz
         {
             chunk_sz = end_addr - addr;
         }
-        if ((ret = bl_cmd_read(addr, buff, chunk_sz-1)) != RET_OK)
+        if ((ret = stm_bl_cmd_read(addr, buff, chunk_sz-1)) != RET_OK)
         {
             return ret;
         }
@@ -121,10 +124,10 @@ enum RET_CODE rt_read_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz
 }
 
 // same params as read above
-enum RET_CODE rt_write_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
+STM_BL_RET rt_write_memory(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: Write memory beginning...\n");
-    enum RET_CODE ret=RET_OK;
+    STM_BL_RET ret=RET_OK;
 
     for (uint32_t i=0, end_addr=addr+len; addr<end_addr; i++, addr+=chunk_sz, buff+=chunk_sz)
     {
@@ -134,7 +137,7 @@ enum RET_CODE rt_write_memory(uint32_t addr, uint8_t* buff, int len, int chunk_s
         {
             chunk_sz = end_addr - addr;
         }
-        if ((ret = bl_cmd_write(addr, buff, chunk_sz-1)) != RET_OK)
+        if ((ret = stm_bl_cmd_write(addr, buff, chunk_sz-1)) != RET_OK)
         {
             return ret;
         }
@@ -157,15 +160,15 @@ enum RET_CODE rt_write_memory(uint32_t addr, uint8_t* buff, int len, int chunk_s
 // }
 
 // same params as read/write cmd/rt
-enum RET_CODE rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
+STM_BL_RET rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int chunk_sz)
 {
     printf("Routine: erase_write_and_verify_flash memory beginning...\n");
-    enum RET_CODE ret=RET_OK;
+    STM_BL_RET ret=RET_OK;
     
-    if ((ret=bl_cmd_erase_global())!=RET_OK) return ret;
+    if ((ret=stm_bl_cmd_erase_global())!=RET_OK) return ret;
     
     //uint8_t dumbbuff[256];
-    //if ((ret=bl_cmd_get(dumbbuff))!=RET_OK) return ret;
+    //if ((ret=stm_bl_bl_cmd_get(dumbbuff))!=RET_OK) return ret;
     
     //wait_msg(10);
 
@@ -176,10 +179,10 @@ enum RET_CODE rt_erase_write_verify(uint32_t addr, uint8_t* buff, int len, int c
         
         if (addr + chunk_sz > end_addr) chunk_sz=end_addr-addr;
 
-        if ((ret = bl_cmd_write(addr, buff, chunk_sz-1)) != RET_OK) return ret;
+        if ((ret = stm_bl_cmd_write(addr, buff, chunk_sz-1)) != RET_OK) return ret;
 
         static uint8_t cmp_buff[256];
-        if ((ret = bl_cmd_read(addr, cmp_buff, chunk_sz-1)) != RET_OK) return ret;
+        if ((ret = stm_bl_cmd_read(addr, cmp_buff, chunk_sz-1)) != RET_OK) return ret;
 
         if (memcmp(buff, cmp_buff, chunk_sz)!=0) return RET_ERR;
     }
@@ -255,9 +258,9 @@ void restart_STM()
 
 void configure_host()
 {
-    enum RASPI_PINS SPI_PINS[] = {SPI_CS_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CLK_PIN};
+    RASPI_PIN SPI_PINS[] = {SPI_CS_PIN, SPI_MISO_PIN, SPI_MOSI_PIN, SPI_CLK_PIN};
     char cmd[100] = {0};
-    for (int i=0; i<sizeof(SPI_PINS)/sizeof(enum RASPI_PINS); i++)
+    for (int i=0; i<sizeof(SPI_PINS)/sizeof(RASPI_PIN); i++)
     {
         sprintf(cmd, "pinctrl set %d a0", SPI_PINS[i]);
         system(cmd);
@@ -475,10 +478,10 @@ int main(int argc, char **argv)
 
     configure_host();
     enter_bootloader();
-    enum RET_CODE ret = bl_sync();
+    STM_BL_RET ret = stm_bl_sync();
     if (ret!=RET_OK)
     {
-        printf("Bootloader sync failed with error: %s\n\n", RET_CODE_STR[ret]);
+        printf("Bootloader sync failed with error: %s\n\n", STM_BL_RET_STR[ret]);
         exit(ret);
     }
 
@@ -489,13 +492,13 @@ int main(int argc, char **argv)
             // do nothing since we're already sync'd
             break;
         case RT_GET_CMD:
-            ret=bl_cmd_get(global_buff);
+            ret=stm_bl_cmd_get(global_buff);
             break;
         case RT_ERASE_CMD:
-            ret=bl_cmd_erase_global();
+            ret=stm_bl_cmd_erase_global();
             break;
         case RT_READ_CMD:
-            ret = bl_cmd_read(address, global_buff, chunk_sz-1);
+            ret = stm_bl_cmd_read(address, global_buff, chunk_sz-1);
             break;
         case RT_READ:
             printf("filename: %s\n", filename);
@@ -524,6 +527,6 @@ int main(int argc, char **argv)
             break; //should not get here
     }
 
-    printf("Routine executed with ret code: %s\n\n", RET_CODE_STR[ret]);
+    printf("Routine executed with ret code: %s\n\n", STM_BL_RET_STR[ret]);
     return ret;
 }
