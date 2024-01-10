@@ -299,16 +299,6 @@ void configure_host()
         printf("PIN%d consumer '%s' != '%s'; gpio dev sanity check failed!\n");
         exit(RET_ERR);
     }
-
-    // //gpio_set_hi_z(SPI_CS_PIN);
-    // gpio_set_hi_z(SPI_MISO_PIN);
-    // gpio_set_hi_z(SPI_MOSI_PIN);
-    // gpio_set_hi_z(SPI_CLK_PIN);
-
-    //gpio_reset(SPI_CS_PIN);
-
-
-
 }
 
 void enter_bootloader()
