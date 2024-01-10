@@ -1,0 +1,1 @@
+gcc -E stm_bl_base.c -o stm_bl_base_dsp.c
